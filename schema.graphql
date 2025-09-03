@@ -1,0 +1,14 @@
+directive @model on OBJECT
+directive @connection(fromField: String) on FIELD_DEFINITION
+
+type Post @model {
+    content: String!
+    name: String!
+    author: Author! @connection
+}
+
+type Author @model {
+    firstName: String!
+    lastName: String!
+    posts: [Post!] @connection(fromField: "author")
+}
