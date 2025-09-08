@@ -51,7 +51,7 @@ const createModelInputs = (nodes: ParserField[]) => {
                 .map((arg) => {
                     const isScalar = !!scalars.includes(getTypeName(arg.type.fieldType));
                     if (!isScalar) {
-                        replaceTypeWithString(arg.type.fieldType)
+                        replaceTypeWithID(arg.type.fieldType)
                     }
                     const compiledType = compileType(arg.type.fieldType);
                     return `${arg.name}: ${compiledType}`;
@@ -65,7 +65,7 @@ const createModelInputs = (nodes: ParserField[]) => {
                     }
                     const isScalar = !!scalars.includes(getTypeName(arg.type.fieldType));
                     if (!isScalar) {
-                        replaceTypeWithString(arg.type.fieldType)
+                        replaceTypeWithID(arg.type.fieldType)
                     }
                     const compiledType = compileType(arg.type.fieldType);
                     return `${arg.name}: ${compiledType}`;
@@ -81,18 +81,15 @@ input ${model_type.name}Update {
         })
 };
 
-const replaceTypeWithString = (field: FieldType) => {
+const replaceTypeWithID = (field: FieldType) => {
     if (field.type == Options.name) {
-        field.name = "String"
+        field.name = "ID"
     } else {
-        replaceTypeWithString(field.nest)
+        replaceTypeWithID(field.nest)
     }
 };
 
-const schemaFromFile = fs.readFileSync(path.join(process.cwd(), './schema.graphql'), { encoding: 'utf-8' });
-const transformedSchema = transformSchema(schemaFromFile);
-console.log("transformedSchema")
-console.log(transformedSchema);
+
 
 const connectionFunction = (fromField: ParserField) => {
     return [
@@ -115,7 +112,7 @@ const connectionFunction = (fromField: ParserField) => {
                 );
             if (relatedObjectFieldName) {
                 if (isArrayField) {
-                    return tempMemory[argTypeName]
+                    return (tempMemory[argTypeName] || [])
                         .filter((item) => {
                             const fieldInRelatedObject = item[relatedObjectFieldName];
                             if (Array.isArray(fieldInRelatedObject)) {
@@ -125,7 +122,7 @@ const connectionFunction = (fromField: ParserField) => {
                             }
                         })
                 } else {
-                    return tempMemory[argTypeName]
+                    return (tempMemory[argTypeName] || [])
                         .find((item) => {
                             const fieldInRelatedObject = item[relatedObjectFieldName];
                             if (Array.isArray(fieldInRelatedObject)) {
@@ -137,7 +134,7 @@ const connectionFunction = (fromField: ParserField) => {
                 }
             }
             if (isArrayField) {
-                return tempMemory[argTypeName]
+                return (tempMemory[argTypeName] || [])
                     .filter((item) => source[fromField.name].includes(item.id))
             } else {
                 return tempMemory[argTypeName][source[fromField.name]]
@@ -146,5 +143,113 @@ const connectionFunction = (fromField: ParserField) => {
     ] as const
 };
 
-const relations = Object.fromEntries(
-);
+const generateListResolvers = (modelTypes: ParserField[]) => {
+    return Object.fromEntries(
+        modelTypes.map((model_type) => [
+            `list${model_type.name}s`,
+            () => {return tempMemory[model_type.name] || []}
+        ]),
+    );
+};
+
+let idCounter = 0;
+
+const generateMutationResolvers = (modelTypes: ParserField[]) => {
+    return {
+        ...Object.fromEntries(
+            modelTypes.map((model_type) => [
+                `create${model_type.name}`,
+                (_parent: any, args: any) => {
+                    console.log("create${model_type.name}")
+                    tempMemory[model_type.name] ||= [];
+                    const creationPayload = {
+                        ...args[model_type.name],
+                        id: '' + idCounter++,
+                    };
+                    console.log("creationPayload", creationPayload);
+                    tempMemory[model_type.name].push(creationPayload);
+                    return creationPayload;
+                },
+            ]),
+        ),
+        ...Object.fromEntries(
+            modelTypes.map((model_type) => [
+                `delete${model_type.name}`,
+                (_parent: any, args: any) => {
+                    tempMemory[model_type.name] ||= [];
+                    if (!tempMemory[model_type.name].find((item) => item.id === args.id)) {
+                        return false;
+                    }
+                    tempMemory[model_type.name] = tempMemory[model_type.name].find((item) => item.id !== args.id);
+                    return true;
+                }
+            ]),
+        ),
+        ...Object.fromEntries(
+            modelTypes.map((model_type) => [
+                `update${model_type.name}`,
+                (_parent: any, args: any) => {
+                    tempMemory[model_type.name] ||= [];
+                    if (!tempMemory[model_type.name].find((item) => item.id === args.id)) {
+                        return null;
+                    }
+                    tempMemory[model_type.name] = tempMemory[model_type.name]
+                        .map((item) => item.id !== args.id ? item : {...item, ...args[model_type.name]});
+                    return tempMemory[model_type.name].find((item) => item.id === args.id);
+                }
+            ]),
+        ),
+    };
+};
+
+
+const run = async () => {
+    const schemaFromFile = fs.readFileSync(path.join(process.cwd(), './schema.graphql'), { encoding: 'utf-8' });
+    const transformedSchema = transformSchema(schemaFromFile);
+    console.log("transformedSchema")
+    console.log(transformedSchema);
+
+    const tree = Parser.parse(schemaFromFile);
+    const modelTypes = tree.nodes.filter((n) => n.directives.find((d) => d.name === 'model'));
+
+    const relations = Object.fromEntries(
+        tree.nodes
+            .filter((node) => node.args.some((arg) => arg.directives.find((directive) => directive.name === 'connection')))
+            .map((node) => {
+                return [
+                    node.name,
+                    Object.fromEntries(
+                        node.args
+                        .filter((arg) => arg.directives.find((directive) => directive.name === 'connection'))
+                        .map(connectionFunction)
+                    )
+                ] as const
+            })
+    );
+    console.log("relations")
+    console.log(relations)
+
+    const listResolvers = generateListResolvers(modelTypes)
+    console.log("listResolvers")
+    console.log(listResolvers)
+
+    const mutationResolvers = generateMutationResolvers(modelTypes)
+    console.log("mutationResolvers")
+    console.log(mutationResolvers)
+
+    const schema = createSchema({
+        typeDefs: transformedSchema,
+        resolvers: {
+            ...relations,
+            Query: listResolvers,
+            Mutation: mutationResolvers,
+        },
+    })
+    const yoga = createYoga({schema});
+    const server = createServer(yoga);
+    server.listen(4000, () => {
+        console.info("Server is running on http://localhost:4000/graphql")
+    });
+}
+
+run();
